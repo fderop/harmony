@@ -372,7 +372,6 @@ int harmony::update_R() {
       RMAT log_diversity =
         arma::repmat(conv_to<RVEC>::from(theta).t(), K, 1) %
         log(((2*E_double) + 1) / (O_double + E_double + 1));
-      // Counts stay frozen for the entire block. Only score storage is per cell.
       for (unsigned cell = idx_min; cell <= idx_max; ++cell) {
         RVEC log_scores = distance_log_scores(
           dist_mat_randomized.col(cell), sigma_double);
