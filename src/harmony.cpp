@@ -10,17 +10,26 @@
 
 namespace {
 
-RMAT distance_log_scores(const MATTYPE& distances, const VECTYPE& sigma) {
-  RMAT log_scores = -conv_to<RMAT>::from(distances);
-  log_scores.each_col() /= conv_to<RVEC>::from(sigma);
-  return log_scores;
+RVEC distance_log_scores(const arma::subview_col<SCALAR>& distances,
+                         const RVEC& sigma) {
+  return -conv_to<RVEC>::from(distances) / sigma;
 }
 
-MATTYPE normalize_log_scores(RMAT log_scores) {
-  log_scores.each_row() -= max(log_scores, 0);
+VECTYPE normalize_log_scores(RVEC& log_scores) {
+  log_scores -= log_scores.max();
   log_scores = exp(log_scores);
-  log_scores.each_row() /= sum(log_scores, 0);
-  return conv_to<MATTYPE>::from(log_scores);
+  log_scores /= accu(log_scores);
+  return conv_to<VECTYPE>::from(log_scores);
+}
+
+void initialize_assignments(MATTYPE& assignments, const MATTYPE& distances,
+                            const VECTYPE& sigma) {
+  const RVEC sigma_double = conv_to<RVEC>::from(sigma);
+  assignments.set_size(distances.n_rows, distances.n_cols);
+  for (arma::uword cell = 0; cell < distances.n_cols; ++cell) {
+    RVEC log_scores = distance_log_scores(distances.col(cell), sigma_double);
+    assignments.col(cell) = normalize_log_scores(log_scores);
+  }
 }
 
 } // namespace
@@ -158,7 +167,7 @@ void harmony::init_cluster_cpp() {
   // compute squared distance directly with cross product
   dist_mat = 2 * (1 - Y.t() * Z_corr);
   
-  R = normalize_log_scores(distance_log_scores(dist_mat, sigma));
+  initialize_assignments(R, dist_mat, sigma);
   
   // (3) BATCH DIVERSITY STATISTICS
   E = sum(R, 1) * Pr_b.t();
@@ -264,7 +273,7 @@ int harmony::cluster_cpp() {
     // we did in init_cluster_cpp
     Z_corr = arma::normalise(Z_corr, 2, 0);
     dist_mat = 2 * (1 - Y.t() * Z_corr);  
-    R = normalize_log_scores(distance_log_scores(dist_mat, sigma));
+    initialize_assignments(R, dist_mat, sigma);
     E = sum(R, 1) * Pr_b.t();
     O = R * Phi_t;
     check_finite_state("clustering restart");
@@ -333,6 +342,7 @@ int harmony::update_R() {
   
   SPMAT Phi_randomized(Phi.cols(update_order));
   SPMAT Phi_t_randomized(Phi_randomized.t());
+  const RVEC sigma_double = conv_to<RVEC>::from(sigma);
 
   for (unsigned i = 0; i < n_blocks; i++) {
     unsigned idx_min = i*cells_per_block;
@@ -345,9 +355,7 @@ int harmony::update_R() {
     
     Timer *t_r = new Timer(timers["random_subset"]);
     auto Rcells = R_randomized.submat(0, idx_min, R_randomized.n_rows - 1, idx_max);
-    auto Phicells = Phi_randomized.submat(0, idx_min, Phi_randomized.n_rows - 1, idx_max);
     auto Phi_tcells = Phi_t_randomized.submat(idx_min, 0, idx_max, Phi_t_randomized.n_cols - 1);
-    auto dist_matcells = dist_mat_randomized.submat(0, idx_min, dist_mat_randomized.n_rows - 1, idx_max);
     delete t_r;
     
     {
@@ -359,16 +367,20 @@ int harmony::update_R() {
     // Step 2: recompute R for removed cells
     {
       Timer t(timers["Rcells_update"]);
-      RMAT log_scores = distance_log_scores(MATTYPE(dist_matcells), sigma);
       RMAT E_double = conv_to<RMAT>::from(E);
       RMAT O_double = conv_to<RMAT>::from(O);
       RMAT log_diversity =
         arma::repmat(conv_to<RVEC>::from(theta).t(), K, 1) %
         log(((2*E_double) + 1) / (O_double + E_double + 1));
-      for (auto factor = Phicells.begin(); factor != Phicells.end(); ++factor) {
-        log_scores.col(factor.col()) += log_diversity.col(factor.row());
+      for (unsigned cell = idx_min; cell <= idx_max; ++cell) {
+        RVEC log_scores = distance_log_scores(
+          dist_mat_randomized.col(cell), sigma_double);
+        for (auto factor = Phi_randomized.begin_col(cell);
+             factor != Phi_randomized.end_col(cell); ++factor) {
+          log_scores += log_diversity.col(factor.row());
+        }
+        R_randomized.col(cell) = normalize_log_scores(log_scores);
       }
-      Rcells = normalize_log_scores(log_scores);
     }
 
     {
